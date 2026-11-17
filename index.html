@@ -277,6 +277,11 @@ footer { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--line);
             <b>جلاء 2 <span class="tag">تحسين</span><span class="tick"><svg class="i"><use href="#i-check"/></svg></span></b>
             <small>تنظيف التشويش وتوضيح التفاصيل للمقاطع المضغوطة، وبعدها يجهّزه بنفس إعدادات جلاء 1.</small>
           </label>
+          <label class="opt">
+            <input type="radio" name="mode" value="iphone">
+            <b>جلاء آيفون <span class="tag">للجوال</span><span class="tick"><svg class="i"><use href="#i-check"/></svg></span></b>
+            <small>نفس تحسين جلاء 2 وبنفس الدقة، بس بطريقة توفّر ذاكرة الجوال عشان الصفحة ما تنقفل في الآيفون.</small>
+          </label>
         </div>
         <label class="switch" id="mbRow" hidden>
           <span><b>Motion Blur</b><small>أثر حركة ناعم للمشاهد السريعة</small></span>
@@ -351,7 +356,8 @@ footer { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--line);
 </div>
 
 <script type="module">
-import { Input, Output, Conversion, BlobSource, BufferTarget, StreamTarget, Mp4OutputFormat, ALL_FORMATS, canEncodeVideo }
+import { Input, Output, Conversion, BlobSource, BufferTarget, StreamTarget, Mp4OutputFormat, ALL_FORMATS, canEncodeVideo, canEncodeAudio,
+  VideoSample, VideoSampleSink, VideoSampleSource, EncodedPacketSink, EncodedAudioPacketSource, AudioSampleSink, AudioSampleSource }
   from "https://cdn.jsdelivr.net/npm/mediabunny@1.65.0/dist/bundles/mediabunny.min.mjs";
 
 const $ = (id) => document.getElementById(id);
@@ -373,7 +379,8 @@ drop.addEventListener("dragleave", () => drop.classList.remove("over"));
 drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); const f = e.dataTransfer.files[0]; if (f) pick(f); });
 $("change").addEventListener("click", () => { if (!busy) { fileInput.value = ""; fileInput.click(); } });
 $("again").addEventListener("click", () => { if (!busy) { fileInput.value = ""; fileInput.click(); } });
-document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener("change", () => { $("mbRow").hidden = mode() !== "enhance"; }));
+document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener("change", () => { $("mbRow").hidden = mode() === "fast"; }));
+if (IS_IOS) { document.querySelector('input[name="mode"][value="iphone"]').checked = true; $("mbRow").hidden = false; }
 const mode = () => document.querySelector('input[name="mode"]:checked').value;
 
 let srcUrl = null, outUrl = null;
@@ -670,10 +677,318 @@ class Enhancer {
   dispose() { try { this.gl.getExtension("WEBGL_lose_context")?.loseContext(); } catch {} this.canvas.width = this.canvas.height = 1; }
 }
 
+// ---------------------------------------------------------------- GPU engine (WebGL2)
+// iPhone-safe frame path. Every decoded frame is copied ONCE into one reused buffer (its raw YUV planes), converted,
+// cleaned, sharpened and resized on the GPU, read back into one reused RGBA buffer and handed to the encoder.
+// The old path made two canvas → VideoFrame copies per frame (Mediabunny's re-render + ours); Safari frees those
+// late, memory climbed by ~8 MB a frame and iOS killed the tab after a few hundred frames (the "refresh").
+
+// 0) raw planes → RGB at the working size: YUV matrix + range, the clip's rotation/flip, 4-tap anti-alias when shrinking.
+// Texture row 0 is the TOP of the picture everywhere (no flips), so readPixels returns rows top-down.
+const FS_PREP = `#version 300 es
+precision highp float;
+in vec2 uv; out vec4 o;
+uniform sampler2D tY, tU, tV;
+uniform int mode, rot, flipX, full;   // mode 0 NV12 · 1 planar YUV · 2 RGBA · 3 BGRA
+uniform vec2 kRB, step;
+vec2 srcUV(vec2 d){
+  if (flipX == 1) d.x = 1.0 - d.x;
+  if (rot == 90) return vec2(d.y, 1.0 - d.x);
+  if (rot == 180) return vec2(1.0 - d.x, 1.0 - d.y);
+  if (rot == 270) return vec2(1.0 - d.y, d.x);
+  return d;
+}
+vec3 fetchRGB(vec2 d){
+  vec2 s = srcUV(d);
+  if (mode == 2) return texture(tY, s).rgb;
+  if (mode == 3) return texture(tY, s).bgr;
+  float y = texture(tY, s).r;
+  vec2 c = mode == 0 ? texture(tU, s).rg : vec2(texture(tU, s).r, texture(tV, s).r);
+  if (full == 1) c -= 0.5;
+  else { y = (y - 16.0 / 255.0) * (255.0 / 219.0); c = (c - 128.0 / 255.0) * (255.0 / 224.0); }
+  float kr = kRB.x, kb = kRB.y, kg = 1.0 - kr - kb;
+  float r = y + 2.0 * (1.0 - kr) * c.y, b = y + 2.0 * (1.0 - kb) * c.x;
+  return clamp(vec3(r, (y - kr * r - kb * b) / kg, b), 0.0, 1.0);
+}
+void main(){
+  if (step.x == 0.0) { o = vec4(fetchRGB(uv), 1.0); return; }
+  vec3 a = fetchRGB(uv + vec2(-step.x, -step.y)) + fetchRGB(uv + vec2(step.x, -step.y))
+         + fetchRGB(uv + vec2(-step.x, step.y)) + fetchRGB(uv + vec2(step.x, step.y));
+  o = vec4(a * 0.25, 1.0);
+}`;
+
+const MATRIX = { bt709: [0.2126, 0.0722], smpte170m: [0.299, 0.114], bt470bg: [0.299, 0.114], "bt2020-ncl": [0.2627, 0.0593] };
+
+// S = display size of the source, P = working size, T = final size
+class Engine {
+  constructor(S, P, T, rotation, flip, { enhance = true, motionBlur = false } = {}) {
+    [this.w, this.h] = P; [this.ow, this.oh] = T; this.S = S;
+    this.rot = rotation || 0; this.flip = !!flip; this.enhance = enhance; this.mb = motionBlur; this.frame = 0;
+    this.canvas = document.createElement("canvas");
+    this.canvas.width = this.canvas.height = 1;   // never drawn to: all work happens in off-screen textures
+    const gl = this.gl = this.canvas.getContext("webgl2", { antialias: false, depth: false, stencil: false, premultipliedAlpha: false, preserveDrawingBuffer: false, powerPreference: "high-performance" });
+    if (!gl) throw new Error("متصفحك ما يدعم WebGL2، وهو لازم للتحسين ورفع الدقة. جرّب «جلاء 1» بالدقة الأصلية.");
+    this.lost = false;
+    this.canvas.addEventListener("webglcontextlost", (e) => { e.preventDefault(); this.lost = true; });
+    this.prep = this.prog(FS_PREP); this.clean = this.prog(FS_CLEAN); this.finish = this.prog(FS_FINISH); this.scale = this.prog(FS_SCALE);
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    this.fb = gl.createFramebuffer();
+    this.tY = this.tex(); this.tU = this.tex(); this.tV = this.tex(); this.dims = new Map();
+    this.cur = this.target(this.w, this.h);
+    if (enhance) { this.den = [this.target(this.w, this.h), this.target(this.w, this.h)]; this.fin = [this.target(this.w, this.h), this.target(this.w, this.h)]; }
+    this.out = this.ow !== this.w || this.oh !== this.h ? this.target(this.ow, this.oh) : null;
+    this.rgba = new Uint8Array(this.ow * this.oh * 4);
+    this.raw = null; this.raw8 = null;
+    const mp = (this.w * this.h) / 1e6;
+    this.sigma = mp < 1 ? 0.075 : 0.06; this.tAmt = 0.62; this.sharp = mp < 1 ? 0.7 : 0.95;
+    const dispLong = Math.max(S[0], S[1]), workLong = Math.max(this.w, this.h);
+    this.step = dispLong > workLong * 1.05 ? [0.25 / this.w, 0.25 / this.h] : [0, 0];
+  }
+  prog(fs) {
+    const gl = this.gl, p = gl.createProgram();
+    for (const [type, src] of [[gl.VERTEX_SHADER, VS], [gl.FRAGMENT_SHADER, fs]]) {
+      const sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+      gl.attachShader(p, sh);
+    }
+    gl.bindAttribLocation(p, 0, "p"); gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    p.loc = new Map();
+    return p;
+  }
+  tex() {
+    const gl = this.gl, t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1));
+    return t;
+  }
+  target(w, h) {
+    const gl = this.gl, t = this.tex();
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    return t;
+  }
+  // upload one plane; storage is (re)allocated only when its size or format changes
+  plane(t, internal, format, w, h, data, rowLen) {
+    const gl = this.gl, key = `${internal}:${w}x${h}`;
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, rowLen === w ? 0 : rowLen);
+    if (this.dims.get(t) !== key) { gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, gl.UNSIGNED_BYTE, data); this.dims.set(t, key); }
+    else gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, format, gl.UNSIGNED_BYTE, data);
+    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+  }
+  async upload(sample) {
+    const gl = this.gl, fmt = sample.format || "";
+    const cs = sample.colorSpace || {};
+    this.kRB = MATRIX[cs.matrix] || (Math.min(this.S[0], this.S[1]) >= 720 ? MATRIX.bt709 : MATRIX.smpte170m);
+    this.full = cs.fullRange ? 1 : 0;
+    const yuv = /^I(420|422|444)A?(?:P(10|12))?$/.exec(fmt);
+    if (fmt === "NV12" || yuv || /^(RGB|BGR)[AX]$/.test(fmt)) {
+      try {
+        const size = sample.allocationSize();
+        if (!this.raw || this.raw.byteLength < size) this.raw = new Uint8Array(size);
+        const layout = await sample.copyTo(this.raw);
+        const r = sample.visibleRect, w = r.width, h = r.height;
+        if (fmt === "NV12") {
+          this.mode = 0;
+          this.plane(this.tY, gl.R8, gl.RED, w, h, this.raw.subarray(layout[0].offset), layout[0].stride);
+          this.plane(this.tU, gl.RG8, gl.RG, Math.ceil(w / 2), Math.ceil(h / 2), this.raw.subarray(layout[1].offset), layout[1].stride / 2);
+        } else if (yuv) {
+          this.mode = 1;
+          const cw = yuv[1] === "444" ? w : Math.ceil(w / 2), ch = yuv[1] === "420" ? Math.ceil(h / 2) : h;
+          const dims = [[w, h], [cw, ch], [cw, ch]], textures = [this.tY, this.tU, this.tV];
+          if (!yuv[2]) {
+            for (let k = 0; k < 3; k++) this.plane(textures[k], gl.R8, gl.RED, dims[k][0], dims[k][1], this.raw.subarray(layout[k].offset), layout[k].stride);
+          } else {
+            // 10/12-bit: shrink to 8-bit into a second reused buffer (packed rows)
+            const shift = +yuv[2] - 8, need = w * h + 2 * cw * ch;
+            if (!this.raw8 || this.raw8.length < need) this.raw8 = new Uint8Array(need);
+            let o = 0;
+            for (let k = 0; k < 3; k++) {
+              const [pw, ph] = dims[k], stride = layout[k].stride / 2;
+              const src = new Uint16Array(this.raw.buffer, this.raw.byteOffset + layout[k].offset, stride * (ph - 1) + pw);
+              const start = o;
+              for (let y = 0; y < ph; y++) { const row = y * stride; for (let x = 0; x < pw; x++) this.raw8[o++] = src[row + x] >> shift; }
+              this.plane(textures[k], gl.R8, gl.RED, pw, ph, this.raw8.subarray(start), pw);
+            }
+          }
+        } else {
+          this.mode = fmt.startsWith("BGR") ? 3 : 2;
+          this.plane(this.tY, gl.RGBA8, gl.RGBA, w, h, this.raw.subarray(layout[0].offset), layout[0].stride / 4);
+        }
+        return;
+      } catch { /* fall through to the browser's own upload */ }
+    }
+    // unknown layout: let the browser upload the frame (rare; same as the old path)
+    gl.bindTexture(gl.TEXTURE_2D, this.tY);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sample.toCanvasImageSource());
+    this.dims.delete(this.tY);
+    this.mode = 2; this.full = 1;
+  }
+  pass(program, out, w, h, texs, floats = {}, ints = {}) {
+    const gl = this.gl;
+    gl.useProgram(program);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out, 0);
+    gl.viewport(0, 0, w, h);
+    const loc = (k) => { if (!program.loc.has(k)) program.loc.set(k, gl.getUniformLocation(program, k)); return program.loc.get(k); };
+    texs.forEach(([name, t], i) => { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t); gl.uniform1i(loc(name), i); });
+    for (const [k, v] of Object.entries(floats)) Array.isArray(v) ? gl.uniform2f(loc(k), v[0], v[1]) : gl.uniform1f(loc(k), v);
+    for (const [k, v] of Object.entries(ints)) gl.uniform1i(loc(k), v);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  // render the uploaded frame into this.rgba (final size, rows top-down)
+  render() {
+    if (this.lost || this.gl.isContextLost()) throw new Error("توقف كرت الشاشة في المتصفح (غالبًا بسبب الذاكرة). سكّر التطبيقات الثانية وجرّب مرة ثانية، أو اختر دقة أقل.");
+    const gl = this.gl, i = this.frame % 2, j = 1 - i, hasPrev = this.frame > 0 ? 1 : 0, w = this.w, h = this.h, px = [1 / w, 1 / h];
+    this.pass(this.prep, this.cur, w, h, [["tY", this.tY], ["tU", this.tU], ["tV", this.tV]],
+      { kRB: this.kRB || MATRIX.bt709, step: this.step }, { mode: this.mode, rot: this.rot, flipX: this.flip ? 1 : 0, full: this.full });
+    let last = this.cur;
+    if (this.enhance) {
+      this.pass(this.clean, this.den[i], w, h, [["cur", this.cur], ["prev", this.den[j]]], { px, hasPrev, sigma: this.sigma, tAmt: this.tAmt });
+      this.pass(this.finish, this.fin[i], w, h, [["img", this.den[i]], ["prevImg", this.fin[j]]], { px, hasPrev, sharp: this.sharp, vib: 0.08, mbAmt: this.mb ? 0.4 : 0 });
+      last = this.fin[i];
+    }
+    if (this.out) { this.pass(this.scale, this.out, this.ow, this.oh, [["img", last]], { size: [w, h] }); last = this.out; }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, last, 0);
+    gl.readPixels(0, 0, this.ow, this.oh, gl.RGBA, gl.UNSIGNED_BYTE, this.rgba);
+    this.frame++;
+  }
+  // the converted original at the working size (for the before/after view, read once)
+  readBefore() {
+    const gl = this.gl, px = new Uint8Array(this.w * this.h * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.cur, 0);
+    gl.readPixels(0, 0, this.w, this.h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return px;
+  }
+  // a VideoSample over the shared RGBA buffer: the encoder copies it during add(), so the buffer is reused safely
+  sample(timestamp, duration) {
+    return new VideoSample(this.rgba, { format: "RGBA", codedWidth: this.ow, codedHeight: this.oh, timestamp, duration, _doNotCopy: true });
+  }
+  dispose() {
+    try { this.gl.getExtension("WEBGL_lose_context")?.loseContext(); } catch {}
+    this.raw = this.raw8 = this.rgba = null;
+  }
+}
+
+// ---------------------------------------------------------------- «جلاء آيفون»: the memory-safe pipeline
+
+// remember a run in progress: if the phone kills the page mid-way, the next visit explains what happened
+const RUN_KEY = "jalaa-run";
+function markRun(v) { try { v ? localStorage.setItem(RUN_KEY, JSON.stringify(v)) : localStorage.removeItem(RUN_KEY); } catch {} }
+try {
+  const last = JSON.parse(localStorage.getItem(RUN_KEY) || "null");
+  if (last && Date.now() - last.at < 864e5) {
+    showMsg(`المرة الماضية انقفلت الصفحة أثناء التجهيز (${last.label}، ${last.size}) لأن ذاكرة الجهاز امتلت. اختر «جلاء آيفون» (يوفّر الذاكرة) وجرّب مرة ثانية، أو اختر «جلاء 1» أو دقة أقل.`);
+  }
+  markRun(null);
+} catch {}
+
+let job = null;
+const canceledError = () => Object.assign(new Error("canceled"), { name: "ConversionCanceledError" });
+
+// decode → GPU → encode, one frame at a time with constant memory; audio is copied as is (or re-encoded to AAC)
+let snapReady = false;
+async function runRework({ S, P, T, fps, codec, bitrate, enhance, mb, sink, onP }) {
+  snapReady = false;
+  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+  const output = new Output({ format: new Mp4OutputFormat({ fastStart: sink.fastStart }), target: sink.target });
+  const me = job = { cancelled: false };
+  let eng = null, audioLost = false;
+  try {
+    const vt = await input.getPrimaryVideoTrack();
+    const at = await input.getPrimaryAudioTrack();
+    const rotation = await vt.getRotation();
+    const flip = typeof vt.getFlip === "function" ? await vt.getFlip() : false;
+    const vsrc = new VideoSampleSource({ codec, bitrate, keyFrameInterval: 1, latencyMode: "quality" });
+    output.addVideoTrack(vsrc, { frameRate: fps });
+    let pumpAudio = null;
+    if (at) {
+      const ac = await at.getCodec();
+      if (ac === "aac") {
+        const asrc = new EncodedAudioPacketSource("aac");
+        output.addAudioTrack(asrc);
+        const decoderConfig = await at.getDecoderConfig();
+        pumpAudio = async () => {
+          let first = true;
+          for await (const pkt of new EncodedPacketSink(at).packets()) {
+            if (me.cancelled) return;
+            if (pkt.timestamp < 0) continue;   // encoder priming before 0
+            await asrc.add(pkt, first ? { decoderConfig } : undefined);
+            first = false;
+          }
+        };
+      } else if (await canEncodeAudio("aac")) {
+        const asrc = new AudioSampleSource({ codec: "aac", bitrate: 192e3 });
+        output.addAudioTrack(asrc);
+        pumpAudio = async () => {
+          for await (const s of new AudioSampleSink(at).samples()) {
+            try { if (me.cancelled) return; if (s.timestamp >= 0) await asrc.add(s); } finally { s.close(); }
+          }
+        };
+      } else audioLost = true;
+    }
+    await output.start();
+
+    const total = Math.max(1, Math.round(info.duration * fps)), snapN = Math.round(info.duration * 0.4 * fps);
+    const pumpVideo = async () => {
+      eng = new Engine(S, P, T, rotation, flip, { enhance, motionBlur: mb });
+      const add = async (n) => { const s = eng.sample(n / fps, 1 / fps); try { await vsrc.add(s); } finally { s.close(); } };
+      let lastN = -1;
+      for await (const sample of new VideoSampleSink(vt).samples()) {
+        let open = true;
+        try {
+          if (me.cancelled) break;
+          const n = Math.round(sample.timestamp * fps);
+          if (n <= lastN) continue;                                         // denser than the target rate (e.g. 120 → 60): drop
+          if (lastN >= 0) for (let k = lastN + 1; k < n && k <= lastN + fps; k++) await add(k);   // gaps (VFR): hold the last frame
+          await eng.upload(sample);
+          sample.close(); open = false;                                     // hand the decoder its surface back right away
+          eng.render();
+          await add(n);
+          lastN = n;
+          if (!snapReady && n >= snapN) { snapshotEngine(eng); snapReady = true; }
+          onP(Math.min(0.98, n / total));
+        } finally { if (open) sample.close(); }
+      }
+      if (!snapReady && lastN >= 0) { snapshotEngine(eng); snapReady = true; }
+    };
+    await Promise.all([pumpVideo(), pumpAudio?.()]);
+    if (me.cancelled) throw canceledError();
+    await output.finalize();
+    return { audioLost };
+  } catch (e) {
+    me.cancelled = true;
+    try { await output.cancel(); } catch {}
+    throw e;
+  } finally {
+    eng?.dispose();
+    input.dispose?.();
+  }
+}
+
+function snapshotEngine(eng) {
+  const put = (id, data, w, h) => {
+    const c = $(id); c.width = w; c.height = h;
+    c.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(data.buffer.slice(data.byteOffset, data.byteOffset + w * h * 4)), w, h), 0, 0);
+  };
+  put("cmpBefore", eng.readBefore(), eng.w, eng.h);
+  put("cmpAfter", eng.rgba, eng.ow, eng.oh);
+}
+
+
 // ---------------------------------------------------------------- run
 
 $("go").addEventListener("click", start);
-$("cancel").addEventListener("click", () => conversion?.cancel());
+$("cancel").addEventListener("click", () => { conversion?.cancel(); if (job) job.cancelled = true; });
 $("save").addEventListener("click", save);
 window.addEventListener("beforeunload", (e) => { if (busy) { e.preventDefault(); e.returnValue = ""; } });
 document.addEventListener("visibilitychange", () => { if (busy && document.visibilityState === "visible") lockScreen(); });
@@ -684,7 +999,7 @@ function unlockScreen() { try { wakeLock?.release(); } catch {} wakeLock = null;
 async function start() {
   if (!file || !info || busy) return;
   busy = true; hideMsg(); clearResult();
-  const enhance = mode() === "enhance", mb = enhance && $("mb").checked;
+  const iphone = mode() === "iphone", enhance = mode() === "enhance" || iphone, mb = enhance && $("mb").checked;
   $("go").disabled = true; $("cancel").hidden = false; $("change").disabled = true;
   document.querySelectorAll('input[name="mode"], input[name="res"], #mb').forEach((el) => el.disabled = true);
   $("srcVideo").pause();
@@ -709,9 +1024,22 @@ async function start() {
     const copy = !enhance && sameSize && info.codec === "avc" && info.cfr && (!info.hasAudio || info.audioCodec === "aac");
     const name = `jalaa-${Date.now()}.mp4`;
     sink = await makeTarget(name);
+    let snapDone = false, audioLost = false, label;
+    if (iphone) {
+      // «جلاء آيفون»: same cleaning, sharpening and sizes as جلاء 2, through the constant-memory pipeline
+      label = "جلاء آيفون";
+      markRun({ at: Date.now(), label, size: `${w}×${h}` });
+      const onP = (p) => {
+        const el = (performance.now() - t0) / 1000, left = p > 0.03 ? el / p - el : NaN;
+        setProgress(p, label, isFinite(left) ? `متبقي تقريبًا ${fmtTime(left)} · لا تقفل الشاشة.` : "لا تقفل الشاشة ولا تطلع من الصفحة.");
+      };
+      audioLost = (await runRework({ S, P, T, fps, codec, bitrate, enhance: true, mb, sink, onP })).audioLost;
+      snapDone = snapReady;
+    } else {
+    markRun({ at: Date.now(), label: mode() === "enhance" ? "جلاء 2" : "جلاء 1", size: `${w}×${h}` });
     const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
     const output = new Output({ format: new Mp4OutputFormat({ fastStart: sink.fastStart }), target: sink.target });
-    let snapDone = false; const snapAt = info.duration * 0.4;
+    const snapAt = info.duration * 0.4;
     const video = copy ? {} : {
       codec, bitrate, frameRate: fps, keyFrameInterval: 1, forceTranscode: true, allowTransformationMetadata: false,
       ...(P[0] !== S[0] || P[1] !== S[1] ? { width: P[0], height: P[1], fit: "fill" } : {}),
@@ -730,14 +1058,15 @@ async function start() {
     }
     conversion = await Conversion.init({ input, output, showWarnings: false, video, audio: !info.hasAudio || info.audioCodec === "aac" ? {} : { codec: "aac", bitrate: 192e3 } });
     if (!conversion.isValid) throw new Error("ما قدرنا نجهّز هذا الفيديو في متصفحك. جرّب سفاري أو كروم محدّث.");
-    const audioLost = info.hasAudio && conversion.discardedTracks.some((d) => d.track.type === "audio");
-    const label = copy ? "نسخ بدون فقدان" : enhance ? "تنظيف وتوضيح" : rework ? "رفع الدقة" : "تجهيز لتيك توك";
+    audioLost = info.hasAudio && conversion.discardedTracks.some((d) => d.track.type === "audio");
+    label = copy ? "نسخ بدون فقدان" : enhance ? "تنظيف وتوضيح" : rework ? "رفع الدقة" : "تجهيز لتيك توك";
     conversion.onProgress = (p) => {
       const el = (performance.now() - t0) / 1000, left = p > 0.03 ? el / p - el : NaN;
       setProgress(p, label, isFinite(left) ? `متبقي تقريبًا ${fmtTime(left)} · لا تقفل الشاشة.` : "لا تقفل الشاشة ولا تطلع من الصفحة.");
     };
     await conversion.execute();
     conversion = null;
+    }
     setProgress(0.99, "التحقق من الناتج…", "");
     const blob = await sink.finish(); sink = null;
     const outFile = new File([blob], (file.name || "video").replace(/\.[^.]+$/, "") + "-jalaa.mp4", { type: "video/mp4" });
@@ -745,13 +1074,13 @@ async function start() {
     if (!snapDone) await snapshotFromFiles(file, outFile, info.duration * 0.4);
     result = outFile;
     showResult(outFile, check, (performance.now() - t0) / 1000, copy ? "بدون إعادة ضغط" : `${CODEC_NAME[codec]} · ${(bitrate / 1e6).toFixed(0)} Mbps`, audioLost);
-    setProgress(1, "الفيديو جاهز", "احفظه من الخطوة 3.");
+    setProgress(1, "الفيديو جاهز", "احفظه من الخطوة 4.");
   } catch (err) {
     sink?.abort();
     if (err?.name === "ConversionCanceledError") { setProgress(0, "أُلغي التجهيز", ""); }
     else { setProgress(0, "تحتاج مراجعة", ""); showMsg(err?.message || String(err)); }
   } finally {
-    enh?.dispose(); conversion = null; busy = false; unlockScreen();
+    enh?.dispose(); markRun(null); conversion = null; job = null; busy = false; unlockScreen();
     $("go").disabled = !info; $("cancel").hidden = true; $("change").disabled = false;
     document.querySelectorAll('input[name="mode"], input[name="res"], #mb').forEach((el) => el.disabled = false);
   }
