@@ -147,6 +147,11 @@ h1 em { font-style: normal; background: linear-gradient(90deg, var(--accent), va
 .seg input:disabled + span { opacity: .5; }
 .sizeline { margin: 10px 0 0; text-align: center; border: 1px solid var(--line); background: var(--bg2); border-radius: 11px; padding: 7px; font-size: .86rem; color: var(--dim); direction: ltr; font-variant-numeric: tabular-nums; }
 .sizeline b { color: var(--accent); }
+.box { margin-top: 12px; border: 1px solid var(--line); border-radius: 14px; padding: 11px 14px; background: var(--bg2); }
+.box b { display: block; font-size: .93rem; }
+.box small { color: var(--dim); font-size: .8rem; }
+.box .segs { margin-top: 10px; }
+.segs.segs3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .prog { margin-top: 14px; }
 .prog .head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
 .prog .head b { font-size: .92rem; font-weight: 600; }
@@ -158,8 +163,12 @@ h1 em { font-style: normal; background: linear-gradient(90deg, var(--accent), va
 
 /* compare */
 .compare { position: relative; border-radius: 14px; overflow: hidden; background: #0c100d; touch-action: none; user-select: none; -webkit-user-select: none; cursor: ew-resize; width: 100%; margin-inline: auto; }
-.compare canvas { display: block; width: 100%; height: 100%; }
+.compare video { display: block; width: 100%; height: 100%; object-fit: contain; pointer-events: none; background: #0c100d; }
 .compare .after { position: absolute; inset: 0; width: 100%; height: 100%; }
+.player { display: flex; align-items: center; gap: 10px; margin: 10px auto 0; direction: ltr; width: 100%; }
+.player .btn.sm { padding: 8px 10px; flex: none; }
+.player input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 28px; }
+.player .time { flex: none; font-size: .8rem; color: var(--dim); font-variant-numeric: tabular-nums; }
 .compare .line { position: absolute; top: 0; bottom: 0; width: 2px; background: #ece3d2; left: 50%; pointer-events: none; transform: translateX(-1px); }
 .compare .knob { position: absolute; top: 50%; width: 34px; height: 34px; border-radius: 50%; background: #ece3d2; color: #1a221d; transform: translate(-50%, -50%); left: 50%; display: grid; place-items: center; pointer-events: none; font-weight: 700; font-size: .8rem; }
 .compare .tag { position: absolute; top: 10px; font-size: .74rem; font-weight: 600; background: rgba(18, 24, 20, .8); color: #ece3d2; padding: 3px 10px; border-radius: 999px; }
@@ -198,6 +207,10 @@ footer { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--line);
   <symbol id="i-save" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5"/><path d="M5 20h14"/></symbol>
   <symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3L10 14"/><path d="M21 3l-7 18-4-7-7-4z"/></symbol>
   <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h13l-3-3M20 16H7l3 3"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+  <symbol id="i-vol" viewBox="0 0 24 24"><path d="M4 9.5h4l5-4v13l-5-4H4z"/><path d="M16.5 9a4 4 0 0 1 0 6"/></symbol>
+  <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9.5h4l5-4v13l-5-4H4z"/><path d="M17 10l4 4M21 10l-4 4"/></symbol>
 </svg>
 
 <div class="wrap">
@@ -248,16 +261,22 @@ footer { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--line);
 
       <section class="card" id="resultCard" hidden>
         <h3>قبل وبعد</h3>
-        <p class="muted" style="margin: 4px 0 12px;">اسحب على الصورة للمقارنة.</p>
+        <p class="muted" style="margin: 4px 0 12px;">شغّل الفيديو واسحب الخط يمين ويسار عشان تشوف الفرق.</p>
+        <!-- live comparison: the original and the result play together, the line wipes between them -->
         <div class="compare" id="compare">
-          <canvas id="cmpBefore"></canvas>
-          <canvas id="cmpAfter" class="after"></canvas>
+          <video id="cmpSrc" playsinline muted preload="auto"></video>
+          <video id="outVideo" class="after" playsinline preload="auto"></video>
           <span class="line" id="cmpLine"></span>
           <span class="knob" id="cmpKnob"><svg class="i" style="width:16px;height:16px"><use href="#i-swap"/></svg></span>
           <span class="tag l">الأصل</span><span class="tag r">جلاء</span>
         </div>
-        <h3 style="margin-top: 18px;">الناتج</h3>
-        <div class="media" id="outBox" style="margin-top: 10px;"><video id="outVideo" playsinline controls preload="metadata"></video></div>
+        <div class="player">
+          <button class="btn sm" id="cmpPlay" aria-label="تشغيل"><svg class="i"><use href="#i-play"/></svg></button>
+          <input type="range" id="cmpSeek" min="0" max="1000" value="0" step="1" aria-label="مكان التشغيل">
+          <span class="time" id="cmpTime">0:00 / 0:00</span>
+          <button class="btn sm ghost" id="cmpMute" aria-label="الصوت"><svg class="i"><use href="#i-vol"/></svg></button>
+        </div>
+        <canvas id="cmpBefore" hidden></canvas><canvas id="cmpAfter" hidden></canvas>
         <div class="facts" id="outFacts"></div>
       </section>
     </div>
@@ -278,15 +297,23 @@ footer { margin-top: 26px; padding-top: 16px; border-top: 1px solid var(--line);
             <small>تنظيف التشويش وتوضيح التفاصيل للمقاطع المضغوطة، وبعدها يجهّزه بنفس إعدادات جلاء 1.</small>
           </label>
           <label class="opt">
-            <input type="radio" name="mode" value="iphone">
-            <b>جلاء آيفون <span class="tag">للجوال</span><span class="tick"><svg class="i"><use href="#i-check"/></svg></span></b>
-            <small>نفس تحسين جلاء 2 وبنفس الدقة، بس بطريقة توفّر ذاكرة الجوال عشان الصفحة ما تنقفل في الآيفون.</small>
+            <input type="radio" name="mode" value="phone">
+            <b>جلاء فون <span class="tag">للجوال</span><span class="tick"><svg class="i"><use href="#i-check"/></svg></span></b>
+            <small>تحسين أقوى: ينظّف التشويش ويطلّع التفاصيل بحدة واضحة على الدقة النهائية. يوفّر ذاكرة الجوال (آيفون وأندرويد) عشان الصفحة ما تنقفل.</small>
           </label>
         </div>
         <label class="switch" id="mbRow" hidden>
           <span><b>Motion Blur</b><small>أثر حركة ناعم للمشاهد السريعة</small></span>
           <input type="checkbox" id="mb"><span class="track" aria-hidden="true"></span>
         </label>
+        <div class="box" id="sharpRow" hidden>
+          <b>قوة الحدة</b><small>كل ما زادت، صارت التفاصيل أوضح والصورة أحدّ.</small>
+          <div class="segs segs3">
+            <label class="seg"><input type="radio" name="sharp" value="normal"><span>عادية</span></label>
+            <label class="seg"><input type="radio" name="sharp" value="strong" checked><span>قوية</span></label>
+            <label class="seg"><input type="radio" name="sharp" value="max"><span>قوية جدًا</span></label>
+          </div>
+        </div>
       </section>
 
       <section class="card">
@@ -379,9 +406,12 @@ drop.addEventListener("dragleave", () => drop.classList.remove("over"));
 drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); const f = e.dataTransfer.files[0]; if (f) pick(f); });
 $("change").addEventListener("click", () => { if (!busy) { fileInput.value = ""; fileInput.click(); } });
 $("again").addEventListener("click", () => { if (!busy) { fileInput.value = ""; fileInput.click(); } });
-document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener("change", () => { $("mbRow").hidden = mode() === "fast"; }));
-if (IS_IOS) { document.querySelector('input[name="mode"][value="iphone"]').checked = true; $("mbRow").hidden = false; }
+const syncMode = () => { $("mbRow").hidden = mode() === "fast"; $("sharpRow").hidden = mode() !== "phone"; };
+document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener("change", syncMode));
 const mode = () => document.querySelector('input[name="mode"]:checked').value;
+if (IS_MOBILE) document.querySelector('input[name="mode"][value="phone"]').checked = true;
+// run once the rest of the module has set up (the result helpers below are still being defined)
+queueMicrotask(syncMode);
 
 let srcUrl = null, outUrl = null;
 function setVideo(el, blob, which) {
@@ -717,11 +747,40 @@ void main(){
   o = vec4(a * 0.25, 1.0);
 }`;
 
+// 4) detail at the FINAL size (after any upscale): two-radius luma unsharp mask. A noise gate leaves flat grain alone,
+// and the result is held to the 3x3 range plus a small overshoot, so edges get crisp without halos or colour fringes.
+const FS_DETAIL = `#version 300 es
+precision highp float;
+in vec2 uv; out vec4 o;
+uniform sampler2D img; uniform vec2 px; uniform float amount;
+float L(vec3 c){ return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+void main(){
+  vec3 c = texture(img, uv).rgb; float l = L(c);
+  float mn = l, mx = l, b1 = l * 4.0, ws = 4.0;
+  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+    if (x == 0 && y == 0) continue;
+    float s = L(texture(img, uv + vec2(x, y) * px).rgb);
+    mn = min(mn, s); mx = max(mx, s);
+    float w = (x == 0 || y == 0) ? 2.0 : 1.0; b1 += s * w; ws += w;
+  }
+  b1 /= ws;
+  float b2 = 0.0;
+  for (int i = 0; i < 8; i++) { float a = float(i) * 0.7853982; b2 += L(texture(img, uv + vec2(cos(a), sin(a)) * 2.5 * px).rgb); }
+  b2 = 0.5 * (b2 / 8.0 + b1);
+  float d1 = l - b1, d2 = l - b2;
+  float gate = smoothstep(0.004, 0.025, abs(d1) + 0.5 * abs(d2));
+  float delta = (d1 + 0.5 * d2) * amount * gate;
+  // soft limit (no hard clamp: clamping strong boosts flattens texture into posterized patches)
+  float room = (delta > 0.0 ? mx - l : l - mn) + 0.02;
+  delta = room * tanh(delta / room);
+  o = vec4(clamp(c + delta, 0.0, 1.0), 1.0);
+}`;
+
 const MATRIX = { bt709: [0.2126, 0.0722], smpte170m: [0.299, 0.114], bt470bg: [0.299, 0.114], "bt2020-ncl": [0.2627, 0.0593] };
 
 // S = display size of the source, P = working size, T = final size
 class Engine {
-  constructor(S, P, T, rotation, flip, { enhance = true, motionBlur = false } = {}) {
+  constructor(S, P, T, rotation, flip, { enhance = true, motionBlur = false, detail = 0 } = {}) {
     [this.w, this.h] = P; [this.ow, this.oh] = T; this.S = S;
     this.rot = rotation || 0; this.flip = !!flip; this.enhance = enhance; this.mb = motionBlur; this.frame = 0;
     this.canvas = document.createElement("canvas");
@@ -731,6 +790,7 @@ class Engine {
     this.lost = false;
     this.canvas.addEventListener("webglcontextlost", (e) => { e.preventDefault(); this.lost = true; });
     this.prep = this.prog(FS_PREP); this.clean = this.prog(FS_CLEAN); this.finish = this.prog(FS_FINISH); this.scale = this.prog(FS_SCALE);
+    this.detail = detail; if (detail > 0) this.sharpen = this.prog(FS_DETAIL);
     const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
@@ -740,10 +800,15 @@ class Engine {
     this.cur = this.target(this.w, this.h);
     if (enhance) { this.den = [this.target(this.w, this.h), this.target(this.w, this.h)]; this.fin = [this.target(this.w, this.h), this.target(this.w, this.h)]; }
     this.out = this.ow !== this.w || this.oh !== this.h ? this.target(this.ow, this.oh) : null;
+    this.det = detail > 0 ? this.target(this.ow, this.oh) : null;
     this.rgba = new Uint8Array(this.ow * this.oh * 4);
     this.raw = null; this.raw8 = null;
     const mp = (this.w * this.h) / 1e6;
     this.sigma = mp < 1 ? 0.075 : 0.06; this.tAmt = 0.62; this.sharp = mp < 1 ? 0.7 : 0.95;
+    // جلاء فون: lighter cleaning so real texture survives (heavy cleaning flattens it into patches the detail pass would outline)
+    if (detail > 0) { this.sigma *= 0.6; this.tAmt = 0.4; }
+    // the detail pass works on the finest scale of the FINAL picture: at the source scale it would outline compression blocks
+    this.detailScale = 1;
     const dispLong = Math.max(S[0], S[1]), workLong = Math.max(this.w, this.h);
     this.step = dispLong > workLong * 1.05 ? [0.25 / this.w, 0.25 / this.h] : [0, 0];
   }
@@ -856,6 +921,7 @@ class Engine {
       last = this.fin[i];
     }
     if (this.out) { this.pass(this.scale, this.out, this.ow, this.oh, [["img", last]], { size: [w, h] }); last = this.out; }
+    if (this.det) { this.pass(this.sharpen, this.det, this.ow, this.oh, [["img", last]], { px: [this.detailScale / this.ow, this.detailScale / this.oh], amount: this.detail }); last = this.det; }
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, last, 0);
     gl.readPixels(0, 0, this.ow, this.oh, gl.RGBA, gl.UNSIGNED_BYTE, this.rgba);
@@ -879,7 +945,7 @@ class Engine {
   }
 }
 
-// ---------------------------------------------------------------- «جلاء آيفون»: the memory-safe pipeline
+// ---------------------------------------------------------------- «جلاء فون»: the memory-safe pipeline
 
 // remember a run in progress: if the phone kills the page mid-way, the next visit explains what happened
 const RUN_KEY = "jalaa-run";
@@ -887,7 +953,7 @@ function markRun(v) { try { v ? localStorage.setItem(RUN_KEY, JSON.stringify(v))
 try {
   const last = JSON.parse(localStorage.getItem(RUN_KEY) || "null");
   if (last && Date.now() - last.at < 864e5) {
-    showMsg(`المرة الماضية انقفلت الصفحة أثناء التجهيز (${last.label}، ${last.size}) لأن ذاكرة الجهاز امتلت. اختر «جلاء آيفون» (يوفّر الذاكرة) وجرّب مرة ثانية، أو اختر «جلاء 1» أو دقة أقل.`);
+    showMsg(`المرة الماضية انقفلت الصفحة أثناء التجهيز (${last.label}، ${last.size}) لأن ذاكرة الجهاز امتلت. اختر «جلاء فون» (يوفّر الذاكرة) وجرّب مرة ثانية، أو اختر «جلاء 1» أو دقة أقل.`);
   }
   markRun(null);
 } catch {}
@@ -897,7 +963,7 @@ const canceledError = () => Object.assign(new Error("canceled"), { name: "Conver
 
 // decode → GPU → encode, one frame at a time with constant memory; audio is copied as is (or re-encoded to AAC)
 let snapReady = false;
-async function runRework({ S, P, T, fps, codec, bitrate, enhance, mb, sink, onP }) {
+async function runRework({ S, P, T, fps, codec, bitrate, enhance, mb, detail = 0, sink, onP }) {
   snapReady = false;
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
   const output = new Output({ format: new Mp4OutputFormat({ fastStart: sink.fastStart }), target: sink.target });
@@ -940,7 +1006,7 @@ async function runRework({ S, P, T, fps, codec, bitrate, enhance, mb, sink, onP 
 
     const total = Math.max(1, Math.round(info.duration * fps)), snapN = Math.round(info.duration * 0.4 * fps);
     const pumpVideo = async () => {
-      eng = new Engine(S, P, T, rotation, flip, { enhance, motionBlur: mb });
+      eng = new Engine(S, P, T, rotation, flip, { enhance, motionBlur: mb, detail });
       const add = async (n) => { const s = eng.sample(n / fps, 1 / fps); try { await vsrc.add(s); } finally { s.close(); } };
       let lastN = -1;
       for await (const sample of new VideoSampleSink(vt).samples()) {
@@ -976,6 +1042,7 @@ async function runRework({ S, P, T, fps, codec, bitrate, enhance, mb, sink, onP 
 }
 
 function snapshotEngine(eng) {
+  if (LIVE_COMPARE) return;   // the live video comparison replaced the still (saves a full-size frame copy on phones)
   const put = (id, data, w, h) => {
     const c = $(id); c.width = w; c.height = h;
     c.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(data.buffer.slice(data.byteOffset, data.byteOffset + w * h * 4)), w, h), 0, 0);
@@ -999,9 +1066,10 @@ function unlockScreen() { try { wakeLock?.release(); } catch {} wakeLock = null;
 async function start() {
   if (!file || !info || busy) return;
   busy = true; hideMsg(); clearResult();
-  const iphone = mode() === "iphone", enhance = mode() === "enhance" || iphone, mb = enhance && $("mb").checked;
+  const phone = mode() === "phone", enhance = mode() === "enhance" || phone, mb = enhance && $("mb").checked;
+  const detail = { normal: 0.5, strong: 0.85, max: 1.3 }[document.querySelector('input[name="sharp"]:checked')?.value] ?? 0.85;
   $("go").disabled = true; $("cancel").hidden = false; $("change").disabled = true;
-  document.querySelectorAll('input[name="mode"], input[name="res"], #mb').forEach((el) => el.disabled = true);
+  document.querySelectorAll('input[name="mode"], input[name="res"], input[name="sharp"], #mb').forEach((el) => el.disabled = true);
   $("srcVideo").pause();
   setProgress(0, "تجهيز…", "لا تقفل الشاشة ولا تطلع من الصفحة لين يخلص.");
   await lockScreen();
@@ -1025,15 +1093,15 @@ async function start() {
     const name = `jalaa-${Date.now()}.mp4`;
     sink = await makeTarget(name);
     let snapDone = false, audioLost = false, label;
-    if (iphone) {
-      // «جلاء آيفون»: same cleaning, sharpening and sizes as جلاء 2, through the constant-memory pipeline
-      label = "جلاء آيفون";
+    if (phone) {
+      // «جلاء فون»: the جلاء 2 cleaning plus a detail pass at the final size, through the constant-memory pipeline
+      label = "جلاء فون";
       markRun({ at: Date.now(), label, size: `${w}×${h}` });
       const onP = (p) => {
         const el = (performance.now() - t0) / 1000, left = p > 0.03 ? el / p - el : NaN;
         setProgress(p, label, isFinite(left) ? `متبقي تقريبًا ${fmtTime(left)} · لا تقفل الشاشة.` : "لا تقفل الشاشة ولا تطلع من الصفحة.");
       };
-      audioLost = (await runRework({ S, P, T, fps, codec, bitrate, enhance: true, mb, sink, onP })).audioLost;
+      audioLost = (await runRework({ S, P, T, fps, codec, bitrate, enhance: true, mb, detail, sink, onP })).audioLost;
       snapDone = snapReady;
     } else {
     markRun({ at: Date.now(), label: mode() === "enhance" ? "جلاء 2" : "جلاء 1", size: `${w}×${h}` });
@@ -1082,7 +1150,7 @@ async function start() {
   } finally {
     enh?.dispose(); markRun(null); conversion = null; job = null; busy = false; unlockScreen();
     $("go").disabled = !info; $("cancel").hidden = true; $("change").disabled = false;
-    document.querySelectorAll('input[name="mode"], input[name="res"], #mb').forEach((el) => el.disabled = false);
+    document.querySelectorAll('input[name="mode"], input[name="res"], input[name="sharp"], #mb').forEach((el) => el.disabled = false);
   }
 }
 
@@ -1098,7 +1166,11 @@ async function verify(f) {
   } finally { input.dispose?.(); }
 }
 
+// the before/after view now plays both videos live, so still snapshots are no longer taken (they cost a full-size
+// copy of a frame — about 70 MB at 4K — which a phone does not need to spend)
+const LIVE_COMPARE = true;
 function snapshot(src, out, w, h) {
+  if (LIVE_COMPARE) return;
   for (const [id, img] of [["cmpBefore", src], ["cmpAfter", out]]) {
     const c = $(id); c.width = w; c.height = h;
     c.getContext("2d").drawImage(img, 0, 0, w, h);
@@ -1106,6 +1178,7 @@ function snapshot(src, out, w, h) {
 }
 // copy mode never touches the frames, so grab the same moment from both files for the before/after view
 async function snapshotFromFiles(a, b, t) {
+  if (LIVE_COMPARE) return;
   try {
     const grab = (f) => new Promise((resolve, reject) => {
       const v = document.createElement("video"); v.muted = true; v.playsInline = true; v.preload = "auto";
@@ -1130,7 +1203,8 @@ function fitBox(el, w, h) {
 function showResult(f, check, secs, how, audioLost) {
   $("resultCard").hidden = false;
   setVideo($("outVideo"), f, "out");
-  fitBox($("outBox"), check.w, check.h); fitBox($("compare"), check.w, check.h);
+  loadCompare();
+  fitBox($("compare"), check.w, check.h);
   const facts = [["الدقة", `${check.w} × ${check.h}`], ["الإطارات", `${fmtFps(check.fps)} FPS`], ["الترميز", how],
     ["البتريت", `${(check.bitrate / 1e6).toFixed(1)} Mbps`], ["الحجم", fmtSize(f.size)], ["وقت المعالجة", fmtTime(secs)]];
   $("outFacts").innerHTML = facts.map(([k, v]) => `<div class="fact"><span>${k}</span><b>${v}</b></div>`).join("");
@@ -1143,15 +1217,62 @@ function showResult(f, check, secs, how, audioLost) {
 function clearResult() {
   result = null; $("resultCard").hidden = true; $("save").disabled = true; $("again").hidden = true; $("saveMsg").hidden = true;
   $("saveHint").textContent = "بعد التجهيز احفظ الفيديو، وبعدها ارفعه من تيك توك.";
+  vA.pause(); vB.pause();
   setVideo($("outVideo"), null, "out");
+  vA.removeAttribute("src"); vA.load();
   for (const id of ["cmpBefore", "cmpAfter"]) { const c = $(id); c.width = c.height = 0; }
 }
 
-// before / after wipe
+// ---------------------------------------------------------------- live before / after: both videos play in step, the line wipes
+const vA = $("cmpSrc"), vB = $("outVideo"), cmpPlay = $("cmpPlay"), cmpSeek = $("cmpSeek"), cmpTime = $("cmpTime"), cmpMute = $("cmpMute");
+const icon = (btn, name) => { btn.querySelector("use").setAttribute("href", `#i-${name}`); };
+function loadCompare() {
+  vA.src = srcUrl;                         // the original (muted); the result (vB) carries the sound
+  vB.muted = false; icon(cmpMute, "vol");
+  cmpSeek.value = 0; icon(cmpPlay, "play");
+  // show a representative frame from both before anyone presses play
+  vB.addEventListener("loadedmetadata", () => {
+    const t = Math.min(vB.duration * 0.4, Math.max(0, vB.duration - 0.2));
+    vB.currentTime = t; vA.currentTime = t; showTime();
+  }, { once: true });
+}
+function showTime() {
+  const d = vB.duration || 0, t = vB.currentTime || 0;
+  if (d) cmpSeek.value = Math.round((t / d) * 1000);
+  cmpTime.textContent = `${fmtTime(t)} / ${fmtTime(d)}`;
+}
+// keep the original locked to the result: nudge its speed for small drifts, jump for big ones
+function follow() {
+  if (vB.paused) return;
+  const drift = vB.currentTime - vA.currentTime;
+  if (Math.abs(drift) > 0.35) { vA.currentTime = vB.currentTime; vA.playbackRate = 1; }
+  else vA.playbackRate = Math.min(1.25, Math.max(0.8, 1 + drift * 1.5));
+  showTime();
+  requestAnimationFrame(follow);
+}
+cmpPlay.addEventListener("click", async () => {
+  if (vB.paused) {
+    if (vB.ended || vB.currentTime >= (vB.duration || 0) - 0.05) vB.currentTime = 0;
+    vA.currentTime = vB.currentTime;
+    try { await vB.play(); } catch { return; }
+    vA.play().catch(() => {});
+  } else { vB.pause(); }
+});
+vB.addEventListener("play", () => { icon(cmpPlay, "pause"); requestAnimationFrame(follow); });
+vB.addEventListener("pause", () => { icon(cmpPlay, "play"); vA.pause(); vA.playbackRate = 1; vA.currentTime = vB.currentTime; showTime(); });
+vB.addEventListener("ended", () => { icon(cmpPlay, "play"); vA.pause(); });
+vB.addEventListener("seeked", () => { if (vB.paused) { vA.currentTime = vB.currentTime; showTime(); } });
+cmpSeek.addEventListener("input", () => {
+  const t = (cmpSeek.value / 1000) * (vB.duration || 0);
+  vB.currentTime = t; vA.currentTime = t; showTime();
+});
+cmpMute.addEventListener("click", () => { vB.muted = !vB.muted; icon(cmpMute, vB.muted ? "mute" : "vol"); });
+
+// the wipe line
 const cmp = $("compare");
 function setWipe(f) {
   f = Math.min(1, Math.max(0, f));
-  $("cmpAfter").style.clipPath = `inset(0 0 0 ${f * 100}%)`;
+  vB.style.clipPath = `inset(0 0 0 ${f * 100}%)`;
   $("cmpLine").style.left = `${f * 100}%`; $("cmpKnob").style.left = `${f * 100}%`;
 }
 const wipeFrom = (e) => { const r = cmp.getBoundingClientRect(); setWipe((e.clientX - r.left) / r.width); };
